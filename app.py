@@ -1,12 +1,13 @@
 import streamlit as st
 import pandas as pd
+import sqlite3
 from datetime import datetime, date, timedelta
 import zoneinfo
 
 # Configuração da página
 st.set_page_config(page_title="Operações CD", layout="wide", initial_sidebar_state="expanded")
 
-# Estilização básica
+# Estilização
 st.markdown("""
     <style>
     .stApp { background-color: #F8FAFC; }
@@ -17,17 +18,38 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# --- BANCO DE DADOS PERMANENTE ---
+DB_NAME = "operacoes_cd.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    # Motoboys cadastrados
+    c.execute('''CREATE TABLE IF NOT EXISTS motoboys (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    nome TEXT UNIQUE, placa TEXT, telefone TEXT)''')
+    # Bipagem de Pacotes
+    c.execute('''CREATE TABLE IF NOT EXISTS pacotes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    data TEXT, codigo TEXT, motoboy TEXT, hora TEXT, tipo TEXT)''')
+    # Historico do dia a dia
+    c.execute('''CREATE TABLE IF NOT EXISTS historico (
+                    data TEXT PRIMARY KEY, total INTEGER, entregues INTEGER, 
+                    insucessos INTEGER, taxa_sucesso REAL, faturamento REAL, 
+                    pago_motos REAL, lucro REAL)''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
 # Função para pegar a hora certa de Brasília
 def obter_hora_brasil():
     fuso_sp = zoneinfo.ZoneInfo("America/Sao_Paulo")
     return datetime.now(fuso_sp)
 
-# --- BANCO DE DADOS NA MEMÓRIA (INICIALMENTE VAZIO) ---
+# --- SESSÃO E NAVEGAÇÃO ---
 if 'etapa' not in st.session_state:
     st.session_state.etapa = 1
-
-if 'motoboys_cadastrados' not in st.session_state:
-    st.session_state.motoboys_cadastrados = []
 
 if 'motoboys_hoje' not in st.session_state:
     st.session_state.motoboys_hoje = []
@@ -35,34 +57,30 @@ if 'motoboys_hoje' not in st.session_state:
 if 'configs_motoboys' not in st.session_state:
     st.session_state.configs_motoboys = {}
 
-if 'pacotes_saida' not in st.session_state:
-    st.session_state.pacotes_saida = []
-
-if 'pacotes_insucesso' not in st.session_state:
-    st.session_state.pacotes_insucesso = []
-
-if 'historico_dias' not in st.session_state:
-    st.session_state.historico_dias = pd.DataFrame(columns=[
-        "Data", "Data_Obj", "Total Pacotes", "Entregues", "Insucessos", 
-        "% Sucesso", "Faturamento ML (R$)", "Pago Motoboys (R$)", "Lucro CD (R$)"
-    ])
-
-# --- FUNÇÕES DE BIPAGEM AUTOMÁTICA (ENTER / LEITOR) ---
+# --- FUNÇÕES DE BIPAGEM COM BANCO DE DADOS ---
 def add_pacote_saida():
     cod = st.session_state.input_bip_saida.strip()
     moto = st.session_state.get('moto_atual_sel', '')
     if cod and moto:
-        st.session_state.pacotes_saida.append({
-            "codigo": cod,
-            "motoboy": moto,
-            "hora": obter_hora_brasil().strftime("%H:%M:%S")
-        })
+        conn = sqlite3.connect(DB_NAME)
+        hoje_str = obter_hora_brasil().strftime("%Y-%m-%d")
+        hora_str = obter_hora_brasil().strftime("%H:%M:%S")
+        conn.execute("INSERT INTO pacotes (data, codigo, motoboy, hora, tipo) VALUES (?, ?, ?, ?, 'SAIDA')",
+                     (hoje_str, cod, moto, hora_str))
+        conn.commit()
+        conn.close()
         st.session_state.input_bip_saida = ""
 
 def add_pacote_insucesso():
     cod = st.session_state.input_bip_insucesso.strip()
     if cod:
-        st.session_state.pacotes_insucesso.append(cod)
+        conn = sqlite3.connect(DB_NAME)
+        hoje_str = obter_hora_brasil().strftime("%Y-%m-%d")
+        hora_str = obter_hora_brasil().strftime("%H:%M:%S")
+        conn.execute("INSERT INTO pacotes (data, codigo, motoboy, hora, tipo) VALUES (?, ?, 'SISTEMA', ?, 'INSUCESSO')",
+                     (hoje_str, cod, hora_str))
+        conn.commit()
+        conn.close()
         st.session_state.input_bip_insucesso = ""
 
 # --- NAVEGAÇÃO LATERAL ---
@@ -85,11 +103,15 @@ for num, nome in menu_opcoes.items():
 
 st.sidebar.markdown("---")
 if st.sidebar.button("🔄 Zerar / Reiniciar Dia Atual", use_container_width=True):
+    conn = sqlite3.connect(DB_NAME)
+    hoje_str = obter_hora_brasil().strftime("%Y-%m-%d")
+    conn.execute("DELETE FROM pacotes WHERE data = ?", (hoje_str,))
+    conn.commit()
+    conn.close()
     st.session_state.motoboys_hoje = []
     st.session_state.configs_motoboys = {}
-    st.session_state.pacotes_saida = []
-    st.session_state.pacotes_insucesso = []
     st.session_state.etapa = 1
+    st.sidebar.success("Dia atual zerado!")
     st.rerun()
 
 # ==========================================
@@ -97,7 +119,6 @@ if st.sidebar.button("🔄 Zerar / Reiniciar Dia Atual", use_container_width=Tru
 # ==========================================
 if st.session_state.etapa == 1:
     st.title("📦 Sistema de Operações do CD")
-    
     agora = obter_hora_brasil()
     st.write(f"**Data e Hora atual:** {agora.strftime('%d/%m/%Y %H:%M:%S')}")
     st.divider()
@@ -116,11 +137,15 @@ if st.session_state.etapa == 1:
 elif st.session_state.etapa == 2:
     st.title("2️⃣ Seleção da Equipe do Dia")
     
+    conn = sqlite3.connect(DB_NAME)
+    df_cadastrados = pd.read_sql_query("SELECT nome, placa, telefone FROM motoboys", conn)
+    conn.close()
+    
     col1, col2 = st.columns([2, 1])
     
     with col1:
         st.subheader("👥 Motoboys Cadastrados")
-        nomes_disponiveis = [m["Nome"] for m in st.session_state.motoboys_cadastrados]
+        nomes_disponiveis = df_cadastrados['nome'].tolist() if not df_cadastrados.empty else []
         
         if not nomes_disponiveis:
             st.info("Nenhum motoboy cadastrado ainda. Use o formulário ao lado para cadastrar.")
@@ -140,8 +165,15 @@ elif st.session_state.etapa == 2:
             novo_tel = st.text_input("Telefone")
             if st.form_submit_button("Cadastrar Motoboy"):
                 if novo_nome:
-                    st.session_state.motoboys_cadastrados.append({"Nome": novo_nome, "Placa": nova_placa, "Telefone": novo_tel})
-                    st.success(f"{novo_nome} cadastrado com sucesso!")
+                    conn = sqlite3.connect(DB_NAME)
+                    try:
+                        conn.execute("INSERT INTO motoboys (nome, placa, telefone) VALUES (?, ?, ?)", 
+                                     (novo_nome, nova_placa, novo_tel))
+                        conn.commit()
+                        st.success(f"{novo_nome} cadastrado com sucesso!")
+                    except:
+                        st.error("Motoboy já cadastrado!")
+                    conn.close()
                     st.rerun()
                 else:
                     st.error("Digite o nome do motoboy!")
@@ -169,6 +201,9 @@ elif st.session_state.etapa == 3:
         moto_atual = st.selectbox("🎯 Escolha o Motoboy para Bipar:", st.session_state.motoboys_hoje, key='moto_atual_sel')
         
         if moto_atual:
+            if moto_atual not in st.session_state.configs_motoboys:
+                st.session_state.configs_motoboys[moto_atual] = {"valor_pacote": 1.80, "obs": ""}
+
             c_conf1, c_conf2 = st.columns([1, 2])
             with c_conf1:
                 val_p = st.number_input(
@@ -191,21 +226,24 @@ elif st.session_state.etapa == 3:
                 on_change=add_pacote_saida
             )
 
-            pacotes_moto = [p for p in st.session_state.pacotes_saida if p["motoboy"] == moto_atual]
-            st.subheader(f"📋 Pacotes Bipados para {moto_atual}: {len(pacotes_moto)} volumes")
-            
-            if pacotes_moto:
-                st.dataframe(pd.DataFrame(pacotes_moto)[['codigo', 'hora']], use_container_width=True, hide_index=True)
+            conn = sqlite3.connect(DB_NAME)
+            hoje_str = obter_hora_brasil().strftime("%Y-%m-%d")
+            df_pacotes_moto = pd.read_sql_query(
+                "SELECT codigo, hora FROM pacotes WHERE data=? AND motoboy=? AND tipo='SAIDA'", 
+                conn, params=(hoje_str, moto_atual)
+            )
+            conn.close()
+
+            st.subheader(f"📋 Pacotes Bipados para {moto_atual}: {len(df_pacotes_moto)} volumes")
+            if not df_pacotes_moto.empty:
+                st.dataframe(df_pacotes_moto, use_container_width=True, hide_index=True)
 
     st.markdown("---")
     c_esp, c_btn = st.columns([3, 1])
     with c_btn:
         if st.button("Finalizar Rotas ➡️", type="primary", use_container_width=True):
-            if not st.session_state.pacotes_saida:
-                st.warning("Nenhum pacote foi bipado ainda!")
-            else:
-                st.session_state.etapa = 4
-                st.rerun()
+            st.session_state.etapa = 4
+            st.rerun()
 
 # ==========================================
 # TELA 4: BIPAGEM DE INSUCESSOS
@@ -219,9 +257,14 @@ elif st.session_state.etapa == 4:
         on_change=add_pacote_insucesso
     )
 
-    st.subheader(f"🔴 Total de Insucessos Bipados: {len(st.session_state.pacotes_insucesso)}")
-    if st.session_state.pacotes_insucesso:
-        st.dataframe(pd.DataFrame({"Código do Insucesso": st.session_state.pacotes_insucesso}), use_container_width=True, hide_index=True)
+    conn = sqlite3.connect(DB_NAME)
+    hoje_str = obter_hora_brasil().strftime("%Y-%m-%d")
+    df_ins = pd.read_sql_query("SELECT codigo, hora FROM pacotes WHERE data=? AND tipo='INSUCESSO'", conn, params=(hoje_str,))
+    conn.close()
+
+    st.subheader(f"🔴 Total de Insucessos Bipados: {len(df_ins)}")
+    if not df_ins.empty:
+        st.dataframe(df_ins[['codigo', 'hora']], use_container_width=True, hide_index=True)
 
     st.markdown("---")
     c_esp, c_btn = st.columns([3, 1])
@@ -236,18 +279,25 @@ elif st.session_state.etapa == 4:
 elif st.session_state.etapa == 5:
     st.title("5️⃣ Reconciliação de Entregas e Insucessos")
     
-    lista_conferencia = []
-    insucessos_set = set(st.session_state.pacotes_insucesso)
+    conn = sqlite3.connect(DB_NAME)
+    hoje_str = obter_hora_brasil().strftime("%Y-%m-%d")
+    df_saidas = pd.read_sql_query("SELECT codigo, motoboy FROM pacotes WHERE data=? AND tipo='SAIDA'", conn, params=(hoje_str,))
+    df_ins = pd.read_sql_query("SELECT codigo FROM pacotes WHERE data=? AND tipo='INSUCESSO'", conn, params=(hoje_str,))
+    conn.close()
+
+    insucessos_set = set(df_ins['codigo'].tolist()) if not df_ins.empty else set()
     
-    for p in st.session_state.pacotes_saida:
-        foi_insucesso = p["codigo"] in insucessos_set
-        lista_conferencia.append({
-            "Código Pacote": p["codigo"],
-            "Motoboy": p["motoboy"],
-            "Status Final": "🔴 INSUCESSO / SOBRA" if foi_insucesso else "🟢 ENTREGUE COM SUCESSO",
-            "Foi Insucesso?": foi_insucesso
-        })
-        
+    lista_conferencia = []
+    if not df_saidas.empty:
+        for _, p in df_saidas.iterrows():
+            foi_insucesso = p["codigo"] in insucessos_set
+            lista_conferencia.append({
+                "Código Pacote": p["codigo"],
+                "Motoboy": p["motoboy"],
+                "Status Final": "🔴 INSUCESSO / SOBRA" if foi_insucesso else "🟢 ENTREGUE COM SUCESSO",
+                "Foi Insucesso?": foi_insucesso
+            })
+            
     df_conf = pd.DataFrame(lista_conferencia)
     
     st.subheader("🔍 Evidenciação dos Códigos")
@@ -264,8 +314,9 @@ elif st.session_state.etapa == 5:
         tot_insucesso = len(df_m[df_m["Foi Insucesso?"] == True]) if not df_m.empty else 0
         tot_entregue = tot_saida - tot_insucesso
         
-        taxa = st.session_state.configs_motoboys[m]["valor_pacote"]
-        obs = st.session_state.configs_motoboys[m]["obs"]
+        cfg = st.session_state.configs_motoboys.get(m, {"valor_pacote": 1.80, "obs": ""})
+        taxa = cfg["valor_pacote"]
+        obs = cfg["obs"]
         valor_final_pago = tot_entregue * taxa
         
         resumo_motos.append({
@@ -293,8 +344,14 @@ elif st.session_state.etapa == 5:
 elif st.session_state.etapa == 6:
     st.title("6️⃣ Fechamento Financeiro do Dia")
     
-    tot_sairam = len(st.session_state.pacotes_saida)
-    tot_insucessos = len(st.session_state.pacotes_insucesso)
+    conn = sqlite3.connect(DB_NAME)
+    hoje_str = obter_hora_brasil().strftime("%Y-%m-%d")
+    df_s = pd.read_sql_query("SELECT codigo, motoboy FROM pacotes WHERE data=? AND tipo='SAIDA'", conn, params=(hoje_str,))
+    df_i = pd.read_sql_query("SELECT codigo FROM pacotes WHERE data=? AND tipo='INSUCESSO'", conn, params=(hoje_str,))
+    conn.close()
+
+    tot_sairam = len(df_s)
+    tot_insucessos = len(df_i)
     tot_entregues = max(0, tot_sairam - tot_insucessos)
     
     taxa_sucesso = (tot_entregues / tot_sairam * 100) if tot_sairam > 0 else 0.0
@@ -326,45 +383,42 @@ elif st.session_state.etapa == 6:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("💾 Salvar Dia no Histórico e Concluir", type="primary"):
         hoje_dt = obter_hora_brasil().date()
-        pago_motos = sum([(tot_entregues/len(st.session_state.motoboys_hoje) if len(st.session_state.motoboys_hoje)>0 else 0) * st.session_state.configs_motoboys[m]['valor_pacote'] for m in st.session_state.motoboys_hoje])
-        fat_final = fat_bonus if taxa_sucesso >= 98 else fat_normal
         
-        novo_registro = pd.DataFrame([{
-            "Data": hoje_dt.strftime("%d/%m/%Y"),
-            "Data_Obj": hoje_dt,
-            "Total Pacotes": tot_sairam,
-            "Entregues": tot_entregues,
-            "Insucessos": tot_insucessos,
-            "% Sucesso": round(taxa_sucesso, 1),
-            "Faturamento ML (R$)": round(fat_final, 2),
-            "Pago Motoboys (R$)": round(pago_motos, 2),
-            "Lucro CD (R$)": round(fat_final - pago_motos, 2)
-        }])
-        st.session_state.historico_dias = pd.concat([novo_registro, st.session_state.historico_dias], ignore_index=True)
-        st.success("Dia finalizado e salvo no histórico com sucesso!")
+        # Calcular total pago aos motoboys
+        pago_motos = 0.0
+        ins_set = set(df_i['codigo'].tolist()) if not df_i.empty else set()
+        
+        for m in st.session_state.motoboys_hoje:
+            df_m = df_s[df_s["motoboy"] == m] if not df_s.empty else pd.DataFrame()
+            tot_s_m = len(df_m)
+            tot_i_m = len([c for c in df_m['codigo'] if c in ins_set]) if not df_m.empty else 0
+            tot_e_m = tot_s_m - tot_i_m
+            
+            taxa_m = st.session_state.configs_motoboys.get(m, {}).get("valor_pacote", 1.80)
+            pago_motos += (tot_e_m * taxa_m)
+
+        fat_final = fat_bonus if taxa_sucesso >= 98.0 else fat_normal
+        lucro_final = fat_final - pago_motos
+
+        conn = sqlite3.connect(DB_NAME)
+        conn.execute("INSERT OR REPLACE INTO historico VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                     (hoje_dt.strftime("%d/%m/%Y"), tot_sairam, tot_entregues, tot_insucessos, round(taxa_sucesso, 1), round(fat_final, 2), round(pago_motos, 2), round(lucro_final, 2)))
+        conn.commit()
+        conn.close()
+        st.success("Dia finalizado e salvo permanentemente no banco de dados com sucesso!")
 
 # ==========================================
-# TELA 7: RELATÓRIO HISTÓRICO
+# TELA 7: RELATÓRIO HISTÓRICO PERMANENTE
 # ==========================================
 elif st.session_state.etapa == 7:
     st.title("📊 Relatório de Desempenho e Histórico")
     
-    col_d1, col_d2 = st.columns(2)
-    dt_hoje = obter_hora_brasil().date()
-    dt_inicio = col_d1.date_input("Data Inicial:", dt_hoje - timedelta(days=30))
-    dt_fim = col_d2.date_input("Data Final:", dt_hoje)
-    
-    df_hist = st.session_state.historico_dias.copy()
-    
-    if not df_hist.empty and 'Data_Obj' in df_hist.columns:
-        df_filtrado = df_hist[(df_hist['Data_Obj'] >= dt_inicio) & (df_hist['Data_Obj'] <= dt_fim)]
-    else:
-        df_filtrado = pd.DataFrame()
+    conn = sqlite3.connect(DB_NAME)
+    df_hist = pd.read_sql_query("SELECT * FROM historico", conn)
+    conn.close()
 
-    st.markdown("---")
-    st.subheader("Resultados no Período Selecionado")
-    
-    if not df_filtrado.empty:
-        st.dataframe(df_filtrado.drop(columns=['Data_Obj'], errors='ignore'), use_container_width=True, hide_index=True)
+    st.subheader("Resultados Salvos no Banco de Dados")
+    if not df_hist.empty:
+        st.dataframe(df_hist, use_container_width=True, hide_index=True)
     else:
-        st.info("Nenhum histórico salvo ainda para o período selecionado.")
+        st.info("Nenhum histórico salvo ainda no banco de dados.")
